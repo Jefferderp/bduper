@@ -102,7 +102,7 @@ def status_reporter(stats, shutdown_event, dry_run=False, delete_duplicates=Fals
             written_str = "0 (dry run)"
         
         # Use carriage return to print on the same line
-        print(f"  Scanned: {found:,} files | Hashed: {hashed:,} so far | Skipped: {skipped:,} duplicates ({skipped_msg}) | Written: {written_str} ", end='\r')
+        print(f"  Found: {found:,} files | Hashed: {hashed:,} so far | Skipped: {skipped:,} duplicates ({skipped_msg}) | Written: {written_str} ", end='\r')
         shutdown_event.wait(0.25) # Update 4 times per second
 
 def scanner_worker(dir_q, file_q, stats):
@@ -314,7 +314,7 @@ def main():
         written_str = "0 (dry run)"
 
     final_message = (
-        f"\nScanned: {found:,} | Hashed: {hashed:,} | "
+        f"\Found: {found:,} | Hashed: {hashed:,} | "
         f"Skipped: {skipped:,} duplicates ({skipped_msg}) | "
         f"Written: {written_str}"
     )
