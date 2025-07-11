@@ -22,11 +22,11 @@ import queue
 try:
     import psutil
     def get_physical_core_count():
-        return psutil.cpu_count(logical=False) or os.cpu_count() or 1
+        return psutil.cpu_count(logical=False) or os.cpu_count() or 4
 except ImportError:
     def get_physical_core_count():
         # Fallback if psutil isn't available
-        return os.cpu_count() or 1
+        return os.cpu_count() or 4
 
 try:
     import blake3
