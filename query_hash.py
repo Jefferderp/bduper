@@ -41,11 +41,11 @@ def main():
     parser.add_argument('--db', default='hashes.lmdb', help='Path to the LMDB database directory')
     args = parser.parse_args()
 
-    if not args.hash or len(args.hash) != 64:
-        print("Error: Please provide a valid 64-character Blake3 hash.", file=sys.stderr)
+    if not args.hash:
+        print("Error: Please provide a hash to check.", file=sys.stderr)
         sys.exit(1)
 
-    query_hash(args.db, args.hash)
+    query_hash(args.db, args.hash[:24])
 
 if __name__ == "__main__":
     main()

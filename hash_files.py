@@ -42,10 +42,11 @@ except ImportError:
     print("Please install it using: pip install lmdb")
     sys.exit(1)
 
-def calculate_file_hash(file_path, chunk_size=8192):
+def calculate_file_hash(file_path, chunk_size=8192, length=None):
     """
     Calculate the Blake3 hash of a file's contents using chunked reading.
     This avoids loading the entire file into memory, similar to --no-mmap option in b3sum.
+    If a length is specified, the hash is truncated.
     """
     hasher = blake3.blake3()
     with open(file_path, 'rb') as f:
@@ -54,6 +55,9 @@ def calculate_file_hash(file_path, chunk_size=8192):
             if not chunk:
                 break
             hasher.update(chunk)
+    
+    if length:
+        return hasher.hexdigest(length=length)
     return hasher.hexdigest()
 
 class Stats:
@@ -139,7 +143,7 @@ def hasher_worker(file_q, hash_q, stats):
             break
         
         try:
-            file_hash = calculate_file_hash(file_path)
+            file_hash = calculate_file_hash(file_path, length=24)
             hash_q.put((file_path, file_hash))
             stats.increment_hashed()
         except Exception as e:
