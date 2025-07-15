@@ -253,9 +253,9 @@ def main():
         help='Scan and hash files, but do not write to the database'
     )
     parser.add_argument(
-        '-dt', '--delete-threads', type=int,
+        '-dt', '--deleter-threads', type=int,
         default=num_physical_cores,
-        help=f'Number of delete threads (default: {num_physical_cores})'
+        help=f'Number of deleter threads (default: {num_physical_cores})'
     )
     args = parser.parse_args()
     
