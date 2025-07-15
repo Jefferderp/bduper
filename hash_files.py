@@ -97,9 +97,9 @@ class Stats:
 def status_reporter(stats, shutdown_event, dry_run=False, delete_duplicates=False):
     """Periodically prints the status of the pipeline."""
     while not shutdown_event.is_set():
-        found, hashed, written, skipped, _ = stats.get()
+        found, hashed, written, skipped, deleted = stats.get()
         
-        skipped_msg = "deleted from disk" if delete_duplicates else "ignored"
+        skipped_msg = f"deleted: {deleted:,}" if delete_duplicates else "ignored"
         
         written_str = f"{written:,} unique hashes"
         if dry_run:
@@ -151,10 +151,12 @@ def hasher_worker(file_q, hash_q, stats):
         finally:
             file_q.task_done()
 
-def database_writer(db_path, hash_q, num_hashers, stats, dry_run=False, delete_duplicates=False):
+def database_writer(db_path, hash_q, delete_q, num_hashers, stats, dry_run=False, delete_duplicates=False):
     """
     A dedicated writer thread that consumes hashes from a queue and
     writes them to an LMDB database. Skips writing if dry_run is True.
+    If a duplicate is found and delete_duplicates is True, the file path
+    is put on the delete_q for the deleter_worker threads to handle.
     """
     if dry_run:
         # In dry-run mode, just consume items from the queue without writing
@@ -189,11 +191,7 @@ def database_writer(db_path, hash_q, num_hashers, stats, dry_run=False, delete_d
             else:
                 stats.increment_skipped()
                 if delete_duplicates:
-                    try:
-                        os.remove(file_path)
-                        stats.increment_deleted()
-                    except OSError as e:
-                        print(f"Error deleting file {file_path}: {e}", file=sys.stderr)
+                    delete_q.put(file_path)
 
             if hashes_in_txn >= 1000:
                 txn.commit()
@@ -209,6 +207,23 @@ def database_writer(db_path, hash_q, num_hashers, stats, dry_run=False, delete_d
         txn.abort()
 
     env.close()
+
+def deleter_worker(delete_q, stats):
+    """
+    Worker thread that consumes file paths from a queue and deletes them.
+    """
+    while True:
+        file_path = delete_q.get()
+        if file_path is None:
+            break
+        
+        try:
+            os.remove(file_path)
+            stats.increment_deleted()
+        except OSError as e:
+            print(f"Error deleting file {file_path}: {e}", file=sys.stderr)
+        finally:
+            delete_q.task_done()
 
 def main():
     num_physical_cores = get_physical_core_count()
@@ -237,6 +252,11 @@ def main():
         '-d', '--dry-run', action='store_true',
         help='Scan and hash files, but do not write to the database'
     )
+    parser.add_argument(
+        '-dt', '--delete-threads', type=int,
+        default=num_physical_cores,
+        help=f'Number of delete threads (default: {num_physical_cores})'
+    )
     args = parser.parse_args()
     
     if not os.path.isdir(args.directory):
@@ -254,12 +274,14 @@ def main():
     dir_queue = queue.Queue()
     file_queue = queue.Queue()
     hash_queue = queue.Queue()
+    delete_queue = queue.Queue()
     
     # --- Threading Configuration ---
     num_scanner_threads = args.scanner_threads
     num_hasher_threads = args.hasher_threads
+    num_deleter_threads = args.deleter_threads
     
-    print(f"Using {num_scanner_threads} scanner threads and {num_hasher_threads} hasher threads.")
+    print(f"Using {num_scanner_threads} scanner threads, {num_hasher_threads} hasher threads, and {num_deleter_threads} deleter threads.")
     if args.dry_run:
         print("--- DRY RUN MODE ---")
     
@@ -270,9 +292,16 @@ def main():
     
     writer_thread = threading.Thread(
         target=database_writer,
-        args=(db_path, hash_queue, num_hasher_threads, stats, args.dry_run, args.delete)
+        args=(db_path, hash_queue, delete_queue, num_hasher_threads, stats, args.dry_run, args.delete)
     )
     writer_thread.start()
+    
+    deleter_threads = []
+    if args.delete:
+        for _ in range(num_deleter_threads):
+            thread = threading.Thread(target=deleter_worker, args=(delete_queue, stats))
+            thread.start()
+            deleter_threads.append(thread)
     
     hasher_threads = []
     for _ in range(num_hasher_threads):
@@ -305,14 +334,21 @@ def main():
         thread.join()
     writer_thread.join()
     
+    if args.delete:
+        delete_queue.join()
+        for _ in range(num_deleter_threads):
+            delete_queue.put(None)
+        for thread in deleter_threads:
+            thread.join()
+    
     # Stop the status reporter
     status_shutdown_event.set()
     status_thread.join()
     
     # Print final stats
-    found, hashed, written, skipped, _ = stats.get()
+    found, hashed, written, skipped, deleted = stats.get()
     
-    skipped_msg = "deleted from disk" if args.delete else "ignored"
+    skipped_msg = f"deleted: {deleted:,}" if args.delete else "ignored"
     written_str = f"{written:,} unique"
     if args.dry_run:
         written_str = "0 (dry run)"
