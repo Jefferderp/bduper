@@ -2,23 +2,15 @@
 """
 Script to recursively calculate Blake3 hashes of all files under a directory.
 Usage: python3 hash_files.py <directory>
-Output:
-  - Writes all hashes to hashes.list (one per line)
-  - Prints filenames to stdout as they're processed
-Features:
-  - Uses multithreading with number of physical CPU cores
-  - Avoids memory-mapping for large files
 """
 
 import os
 import sys
 import argparse
-import concurrent.futures
 import threading
 import signal
 import queue
 
-# Try to import psutil for accurate physical core count detection
 try:
     import psutil
     def get_physical_core_count():
@@ -321,8 +313,8 @@ def main():
         print(f"Error: '{args.directory}' is not a valid directory")
         sys.exit(1)
 
-    # Use the new --database argument, but fall back to --db for compatibility
-    db_path = args.database if args.database else args.db
+    # Use the new --database argument
+    db_path = args.database
         
     if not args.dry_run and not os.path.exists(db_path):
         os.makedirs(db_path)
@@ -339,7 +331,7 @@ def main():
     num_hasher_threads = args.hasher_threads
     num_deleter_threads = args.deleter_threads
     
-    print(f"Using {num_scanner_threads} scanner threads, {num_hasher_threads} hasher threads, and {num_deleter_threads} deleter threads.")
+    print(f"Using {num_scanner_threads} scanner threads, {num_hasher_threads} hasher threads, {num_deleter_threads} deleter threads.")
     if args.dry_run:
         print("--- DRY RUN MODE ---")
     
