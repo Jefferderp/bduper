@@ -257,7 +257,65 @@ def main():
         default=num_physical_cores,
         help=f'Number of deleter threads (default: {num_physical_cores})'
     )
+    parser.add_argument(
+        '--debug', action='store_true',
+        help='Print debug information and exit'
+    )
     args = parser.parse_args()
+
+    if args.debug:
+        print("--- DEBUG MODE ---")
+
+        # Create a set of all arguments passed on the command line for quick lookup
+        cli_args = set(sys.argv[1:])
+        
+        # Keep track of which destinations we've already printed
+        printed_dests = set()
+
+        # 1. The passed values of any command-line arguments
+        print("\n[Arguments]")
+        for action in parser._actions:
+            # Check if any of the action's option strings (e.g., '-ht', '--hasher-threads') are in cli_args
+            if any(opt in cli_args for opt in action.option_strings):
+                dest = action.dest
+                if dest not in printed_dests:
+                    print(f"  - {dest}: {getattr(args, dest)}")
+                    printed_dests.add(dest)
+        
+        # Handle the positional 'directory' argument
+        if args.directory:
+            if 'directory' not in printed_dests:
+                print(f"  - directory: {args.directory}")
+                printed_dests.add('directory')
+
+        # 2. The default values used, only if overriding arguments weren't passed
+        print("\n[Defaults]")
+        for action in parser._actions:
+            dest = action.dest
+            if dest not in printed_dests and dest not in ('help', 'debug') and action.default is not None:
+                print(f"  - {dest}: {action.default}")
+
+        # 3. The database file location, and if it was found
+        db_path = args.database
+        db_exists = os.path.exists(db_path)
+        print(f"\n[Database]")
+        print(f"  - Location: {os.path.abspath(db_path)}")
+        print(f"  - Exists: {db_exists}")
+
+        # 4. The number of rows (hashes) in the database
+        if db_exists:
+            try:
+                env = lmdb.open(db_path, readonly=True)
+                with env.begin() as txn:
+                    num_hashes = txn.stat()['entries']
+                    print(f"  - Row count: {num_hashes:,}")
+                env.close()
+            except lmdb.Error as e:
+                print(f"  - Error reading database: {e}")
+        else:
+            print("  - Row count: 0")
+        
+        sys.exit(0)
     
     if not os.path.isdir(args.directory):
         print(f"Error: '{args.directory}' is not a valid directory")
