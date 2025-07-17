@@ -86,7 +86,7 @@ class Stats:
         with self.lock:
             return self.files_found, self.files_hashed, self.hashes_written, self.skipped_duplicates, self.files_deleted
 
-def status_reporter(stats, shutdown_event, dry_run=False, delete_duplicates=False):
+def status_reporter(stats, shutdown_event, dry_run=False, delete_duplicates=False, no_save_hashes=False):
     """Periodically prints the status of the pipeline."""
     while not shutdown_event.is_set():
         found, hashed, written, skipped, deleted = stats.get()
@@ -94,8 +94,8 @@ def status_reporter(stats, shutdown_event, dry_run=False, delete_duplicates=Fals
         skipped_msg = f"deleted: {deleted:,}" if delete_duplicates else "ignored"
         
         written_str = f"{written:,} new hashes"
-        if dry_run:
-            written_str = "0 (dry run)"
+        if dry_run or no_save_hashes:
+            written_str = "0 (read-only mode)"
         
         # Use carriage return to print on the same line
         print(f"  Hashed: {hashed:,} of {found:,} files | Skipped: {skipped:,} duplicates ({skipped_msg}) | Saved: {written_str} ", end='\r')
@@ -143,30 +143,29 @@ def hasher_worker(file_q, hash_q, stats):
         finally:
             file_q.task_done()
 
-def database_writer(db_path, hash_q, delete_q, num_hashers, stats, dry_run=False, delete_duplicates=False):
+def database_writer(db_path, hash_q, delete_q, num_hashers, stats, dry_run=False, delete_duplicates=False, no_save_hashes=False):
     """
     A dedicated writer thread that consumes hashes from a queue and
     writes them to an LMDB database. Skips writing if dry_run is True.
     If a duplicate is found and delete_duplicates is True, the file path
     is put on the delete_q for the deleter_worker threads to handle.
     """
+    # In dry-run mode, just consume items from the queue without writing
     if dry_run:
-        # In dry-run mode, just consume items from the queue without writing
         hashers_finished = 0
         while hashers_finished < num_hashers:
             item = hash_q.get()
             if item is None:
                 hashers_finished += 1
-            # We still need to call task_done if it were used, but it's not on hash_q
         return
 
     map_size = 100 * 1024 * 1024 * 1024
-    env = lmdb.open(db_path, map_size=map_size, writemap=True)
+    env = lmdb.open(db_path, map_size=map_size, writemap=True, readonly=no_save_hashes)
     
     hashes_in_txn = 0
     hashers_finished = 0
     
-    txn = env.begin(write=True)
+    txn = env.begin(write=not no_save_hashes)
 
     while hashers_finished < num_hashers:
         try:
@@ -177,15 +176,26 @@ def database_writer(db_path, hash_q, delete_q, num_hashers, stats, dry_run=False
             
             file_path, file_hash = item
 
-            if txn.put(file_hash.encode('utf-8'), b'', overwrite=False):
-                hashes_in_txn += 1
-                stats.increment_written()
+            # If we are not saving hashes, we only check for existence
+            if no_save_hashes:
+                if txn.get(file_hash.encode('utf-8')) is not None:
+                    stats.increment_skipped()
+                    if delete_duplicates:
+                        delete_q.put(file_path)
+                else:
+                    # If not saving, we are not finding "new" hashes, so we don't increment written
+                    pass
             else:
-                stats.increment_skipped()
-                if delete_duplicates:
-                    delete_q.put(file_path)
+                # Original behavior
+                if txn.put(file_hash.encode('utf-8'), b'', overwrite=False):
+                    hashes_in_txn += 1
+                    stats.increment_written()
+                else:
+                    stats.increment_skipped()
+                    if delete_duplicates:
+                        delete_q.put(file_path)
 
-            if hashes_in_txn >= 1000:
+            if not no_save_hashes and hashes_in_txn >= 1000:
                 txn.commit()
                 hashes_in_txn = 0
                 txn = env.begin(write=True)
@@ -193,7 +203,7 @@ def database_writer(db_path, hash_q, delete_q, num_hashers, stats, dry_run=False
         except queue.Empty:
             continue
             
-    if hashes_in_txn > 0:
+    if not no_save_hashes and hashes_in_txn > 0:
         txn.commit()
     else:
         txn.abort()
@@ -248,6 +258,10 @@ def main():
         '-dt', '--deleter-threads', type=int,
         default=num_physical_cores,
         help=f'Number of deleter threads (default: {num_physical_cores})'
+    )
+    parser.add_argument(
+        '-n', '--no-save-hashes', action='store_true',
+        help='Do not save newly-found hashes to the database.'
     )
     parser.add_argument(
         '--debug', action='store_true',
@@ -333,16 +347,16 @@ def main():
     
     print(f"Using {num_scanner_threads} scanner threads, {num_hasher_threads} hasher threads, {num_deleter_threads} deleter threads.")
     if args.dry_run:
-        print("--- DRY RUN MODE ---")
+        print("--- DRY RUN MODE (no changes will be made) ---")
     
     # --- Start Pipeline Threads ---
     status_shutdown_event = threading.Event()
-    status_thread = threading.Thread(target=status_reporter, args=(stats, status_shutdown_event, args.dry_run, args.delete))
+    status_thread = threading.Thread(target=status_reporter, args=(stats, status_shutdown_event, args.dry_run, args.delete, args.no_save_hashes))
     status_thread.start()
     
     writer_thread = threading.Thread(
         target=database_writer,
-        args=(db_path, hash_queue, delete_queue, num_hasher_threads, stats, args.dry_run, args.delete)
+        args=(db_path, hash_queue, delete_queue, num_hasher_threads, stats, args.dry_run, args.delete, args.no_save_hashes)
     )
     writer_thread.start()
     
@@ -400,8 +414,8 @@ def main():
     
     skipped_msg = f"deleted: {deleted:,}" if args.delete else "ignored"
     written_str = f"{written:,} unique"
-    if args.dry_run:
-        written_str = "0 (dry run)"
+    if args.dry_run or args.no_save_hashes:
+        written_str = "0 (read only mode)"
 
     final_message = (
         f"\Found: {found:,} | Hashed: {hashed:,} | "
